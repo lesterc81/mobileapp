@@ -1,51 +1,70 @@
-import { useSQLiteContext } from 'expo-sqlite';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import {
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
-import { createUser, getActiveUser, listUsers, setActiveUserId } from '../db';
-import { useUserStore } from '../state/userStore';
+import { useAuth } from '../lib/auth';
+import { supabase } from '../lib/supabase';
 import { colors, radius, spacing } from '../theme';
 
 export default function LoginScreen() {
-  const db = useSQLiteContext();
-  const users = useUserStore((s) => s.users);
-  const setUsers = useUserStore((s) => s.setUsers);
-  const setActiveUser = useUserStore((s) => s.setActiveUser);
-  const [name, setName] = useState('');
+  const { signIn } = useAuth();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [mode, setMode] = useState<'login' | 'forgot'>('login');
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const signIn = async (userId: number) => {
-    setBusy(true);
-    try {
-      await setActiveUserId(db, userId);
-      const user = await getActiveUser(db);
-      if (user) setActiveUser(user);
-    } catch (err) {
-      Alert.alert('Sign in failed', err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setBusy(false);
+  const submit = async () => {
+    setErrorMsg(null);
+    setNotice(null);
+
+    if (mode === 'forgot') {
+      if (!email.trim()) {
+        setErrorMsg('Enter your account email.');
+        return;
+      }
+      setBusy(true);
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+        if (error) throw error;
+        setNotice('Password reset link sent. Check your inbox, then reopen this app to set a new password.');
+        setMode('login');
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+      return;
     }
-  };
 
-  const createAndSignIn = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
+    if (!email.trim() || !password) {
+      setErrorMsg('Enter your email and password.');
+      return;
+    }
+
     setBusy(true);
     try {
-      const id = await createUser(db, trimmed);
-      setUsers(await listUsers(db));
-      await signIn(id);
+      await signIn(email.trim(), password);
     } catch (err) {
-      Alert.alert('Could not create user', err instanceof Error ? err.message : 'Unknown error');
+      const msg = err instanceof Error ? err.message : String(err);
+      const friendly = msg.toLowerCase();
+      if (friendly.includes('invalid login credentials')) {
+        setErrorMsg('Wrong email or password.');
+      } else if (friendly.includes('network')) {
+        setErrorMsg('Network error. Check your connection and try again.');
+      } else {
+        setErrorMsg(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -53,147 +72,196 @@ export default function LoginScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={styles.wrap}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.logo}>Inventory POS</Text>
-        <Text style={styles.subtitle}>Who's using the register?</Text>
+        <View style={styles.logo}>
+          <Ionicons name="storefront" size={34} color="#fff" />
+        </View>
+        <Text style={styles.brand}>POS Cloud</Text>
+        <Text style={styles.tagline}>Multi-branch point of sale</Text>
 
-        {users.map((user) => (
+        <View style={styles.card}>
+          {mode === 'forgot' ? (
+            <>
+              <Text style={styles.formTitle}>Reset password</Text>
+              <Text style={styles.hint}>
+                We'll email you a link to set a new password.
+              </Text>
+            </>
+          ) : (
+            <Text style={styles.formTitle}>Sign in</Text>
+          )}
+
+          {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+          {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
+
+          <View style={styles.field}>
+            <Text style={styles.label}>Email</Text>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                placeholder="you@example.com"
+                placeholderTextColor={colors.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="email-address"
+                editable={!busy}
+              />
+            </View>
+          </View>
+
+          {mode === 'login' ? (
+            <View style={styles.field}>
+              <Text style={styles.label}>Password</Text>
+              <View style={styles.inputRow}>
+                <TextInput
+                  style={styles.input}
+                  placeholder="••••••••"
+                  placeholderTextColor={colors.textMuted}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  editable={!busy}
+                  onSubmitEditing={submit}
+                />
+              </View>
+            </View>
+          ) : null}
+
           <Pressable
-            key={user.id}
-            style={({ pressed }) => [styles.userBtn, pressed && styles.userBtnPressed]}
-            onPress={() => signIn(user.id)}
+            style={[styles.button, busy && styles.buttonDisabled]}
+            onPress={submit}
             disabled={busy}
           >
-            <Text style={styles.userBtnText}>{user.name}</Text>
-            <Text style={styles.userBtnChevron}>›</Text>
+            {busy ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>{mode === 'forgot' ? 'Send reset link' : 'Sign in'}</Text>
+            )}
           </Pressable>
-        ))}
 
-        <View style={styles.divider}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>New user</Text>
-          <View style={styles.dividerLine} />
-        </View>
-
-        <View style={styles.newRow}>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="Enter a name"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="words"
-            autoCorrect={false}
-            returnKeyType="go"
-            onSubmitEditing={createAndSignIn}
-          />
           <Pressable
-            style={[styles.addBtn, (!name.trim() || busy) && styles.addBtnDisabled]}
-            onPress={createAndSignIn}
-            disabled={!name.trim() || busy}
+            style={styles.linkBtn}
+            onPress={() => {
+              setMode(mode === 'login' ? 'forgot' : 'login');
+              setErrorMsg(null);
+              setNotice(null);
+            }}
+            disabled={busy}
           >
-            <Text style={styles.addBtnText}>Add & sign in</Text>
+            <Text style={styles.linkText}>
+              {mode === 'login' ? 'Forgot password?' : 'Back to sign in'}
+            </Text>
           </Pressable>
         </View>
+
+        <Text style={styles.footer}>Your data syncs across branches in real time.</Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
+  wrap: { flex: 1, backgroundColor: colors.bg },
   content: {
     flexGrow: 1,
     justifyContent: 'center',
     padding: spacing.xl,
   },
   logo: {
-    fontSize: 30,
-    fontWeight: '900',
-    color: colors.primary,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 16,
-    color: colors.textMuted,
-    textAlign: 'center',
-    marginTop: spacing.sm,
-    marginBottom: spacing.xl,
-  },
-  userBtn: {
-    flexDirection: 'row',
+    alignSelf: 'center',
+    width: 64,
+    height: 64,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
+  },
+  brand: {
+    marginTop: spacing.md,
+    fontSize: 26,
+    fontWeight: '800',
+    textAlign: 'center',
+    color: colors.text,
+  },
+  tagline: {
+    marginTop: 2,
+    fontSize: 14,
+    textAlign: 'center',
+    color: colors.textMuted,
+  },
+  card: {
+    marginTop: spacing.xl,
     backgroundColor: colors.card,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingVertical: 18,
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.sm,
   },
-  userBtnPressed: {
-    backgroundColor: colors.bg,
-  },
-  userBtnText: {
+  formTitle: {
     fontSize: 18,
     fontWeight: '700',
     color: colors.text,
   },
-  userBtnChevron: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: colors.primary,
-  },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    marginVertical: spacing.lg,
-  },
-  dividerLine: {
-    flex: 1,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
-  },
-  dividerText: {
+  hint: {
     fontSize: 13,
-    fontWeight: '600',
     color: colors.textMuted,
+    marginTop: 4,
   },
-  newRow: {
+  notice: {
+    fontSize: 13,
+    color: colors.success,
+    marginTop: spacing.md,
+    backgroundColor: `${colors.success}18`,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+  },
+  error: {
+    fontSize: 13,
+    color: colors.danger,
+    marginTop: spacing.md,
+    backgroundColor: `${colors.danger}12`,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+  },
+  field: { marginTop: spacing.md },
+  label: { fontSize: 13, fontWeight: '600', color: colors.textMuted, marginBottom: 6 },
+  inputRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.md,
+    backgroundColor: colors.bg,
+  },
+  input: {
+    flex: 1,
+    paddingVertical: 12,
     paddingHorizontal: spacing.md,
     fontSize: 16,
     color: colors.text,
   },
-  addBtn: {
+  button: {
+    marginTop: spacing.lg,
     backgroundColor: colors.primary,
     borderRadius: radius.md,
-    paddingHorizontal: spacing.lg,
+    paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: 50,
   },
-  addBtnDisabled: {
-    opacity: 0.4,
-  },
-  addBtnText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
+  buttonDisabled: { opacity: 0.5 },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  linkBtn: { marginTop: spacing.md, alignItems: 'center', paddingVertical: 6 },
+  linkText: { color: colors.primary, fontSize: 14, fontWeight: '600' },
+  footer: {
+    marginTop: spacing.xl,
+    fontSize: 12,
+    textAlign: 'center',
+    color: colors.textMuted,
   },
 });

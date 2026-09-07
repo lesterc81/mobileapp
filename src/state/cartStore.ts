@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 export interface CartLine {
-  productId: number;
+  productId: string;
   name: string;
   price: number;
   quantity: number;
@@ -9,10 +9,10 @@ export interface CartLine {
 
 interface CartState {
   lines: CartLine[];
-  add: (product: { id: number; name: string; price: number }) => void;
-  increment: (productId: number) => void;
-  decrement: (productId: number) => void;
-  remove: (productId: number) => void;
+  add: (product: { id: string; name: string; price: number }) => void;
+  increment: (productId: string) => void;
+  decrement: (productId: string) => void;
+  remove: (productId: string) => void;
   clear: () => void;
 }
 

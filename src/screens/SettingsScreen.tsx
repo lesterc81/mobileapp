@@ -1,304 +1,220 @@
-import { useSQLiteContext } from 'expo-sqlite';
+import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { BigButton, Field, ModalShell } from '../components/ui';
-import {
-  createUser,
-  deleteUser,
-  listUsers,
-  resetDatabase,
-  setActiveUserId,
-} from '../db';
-import { useCart } from '../state/cartStore';
-import { useDataVersion } from '../state/dataVersion';
-import { useUserStore } from '../state/userStore';
-import { useAppStore } from '../state/appStore';
-import { exportBackup, pickBackupFile, restoreBackup } from '../services/backup';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import type { SettingsStackParamList } from '../navigation/SettingsStack';
+import { importLegacyData } from '../services/importLegacy';
+import type { ImportReport } from '../services/importLegacy';
+import { Badge, BigButton, ModalShell } from '../components/ui';
+import { useAuth } from '../lib/auth';
 import { colors, radius, spacing } from '../theme';
 
+type Nav = NativeStackNavigationProp<SettingsStackParamList>;
+
 export default function SettingsScreen() {
-  const db = useSQLiteContext();
-  const activeUser = useUserStore((s) => s.activeUser);
-  const users = useUserStore((s) => s.users);
-  const setUsers = useUserStore((s) => s.setUsers);
-  const setActiveUser = useUserStore((s) => s.setActiveUser);
-  const clearCart = useCart((s) => s.clear);
-  const bump = useDataVersion((s) => s.bump);
-  const bumpDbRemount = useAppStore((s) => s.bumpDbRemount);
-  const [addOpen, setAddOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const { profile, signOut } = useAuth();
+  const navigation = useNavigation<Nav>();
+  const insets = useSafeAreaInsets();
 
-  const doExport = async () => {
-    setBusy(true);
-    try {
-      await exportBackup(db);
-    } catch (err) {
-      Alert.alert('Backup failed', err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const doImport = async () => {
-    const uri = await pickBackupFile();
-    if (!uri) return;
-    setBusy(true);
-    try {
-      await restoreBackup(db, uri);
-      clearCart();
-      setUsers([]);
-      setActiveUser(null);
-      bumpDbRemount();
-    } catch (err) {
-      Alert.alert('Restore failed', err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const refreshUsers = async () => {
-    setUsers(await listUsers(db));
-  };
-
-  const switchUser = async () => {
-    await setActiveUserId(db, null);
-    clearCart();
-    setActiveUser(null);
-  };
-
-  const removeUser = (id: number, name: string) => {
-    if (activeUser?.id === id) {
-      Alert.alert('Cannot delete', 'You cannot delete the user who is signed in. Switch users first.');
-      return;
-    }
-    Alert.alert('Delete user', `Delete "${name}"? Their sales history stays, it just loses the name.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          await deleteUser(db, id);
-          await refreshUsers();
-        },
-      },
-    ]);
-  };
-
-  const resetAll = () => {
-    Alert.alert(
-      'Reset all data',
-      'This deletes EVERYTHING — ingredients, products, sales, users, history. It cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete everything',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await resetDatabase(db);
-              clearCart();
-              setUsers([]);
-              setActiveUser(null);
-              bump();
-            } catch (err) {
-              Alert.alert('Reset failed', err instanceof Error ? err.message : 'Unknown error');
-            }
-          },
-        },
-      ]
-    );
-  };
+  const role = profile?.role ?? 'cashier';
+  const isOwner = role === 'owner';
+  const isManager = role === 'manager' || isOwner;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.sectionTitle}>Signed in</Text>
-      <View style={styles.card}>
-        {activeUser ? (
-          <Text style={styles.activeName}>{activeUser.name}</Text>
-        ) : (
-          <Text style={styles.activeName}>No user</Text>
-        )}
+    <ScrollView
+      style={styles.wrap}
+      contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
+    >
+      <View style={styles.profileCard}>
+        <View style={styles.avatar}>
+          <Text style={styles.avatarText}>{(profile?.full_name ?? '?').slice(0, 2).toUpperCase()}</Text>
+        </View>
+        <View style={styles.profileInfo}>
+          <Text style={styles.profileName}>{profile?.full_name ?? '—'}</Text>
+          <Text style={styles.profileEmail}>{profile?.email ?? ''}</Text>
+          <Badge label={role} color={role === 'owner' ? colors.warning : role === 'manager' ? colors.primary : colors.success} />
+        </View>
       </View>
 
-      <Text style={styles.sectionTitle}>Users</Text>
-      {users.map((user) => (
-        <View key={user.id} style={styles.userRow}>
-          <View style={styles.userRowInfo}>
-            <Text style={styles.userRowName}>{user.name}</Text>
-            {user.id === activeUser?.id ? (
-              <Text style={styles.activeBadge}>Active</Text>
-            ) : null}
-          </View>
-          <Pressable style={styles.deleteBtn} onPress={() => removeUser(user.id, user.name)} hitSlop={8}>
-            <Text style={styles.deleteBtnText}>Remove</Text>
-          </Pressable>
-        </View>
-      ))}
-      <BigButton title="Add user" variant="ghost" icon="person-add-outline" onPress={() => setAddOpen(true)} />
+      <Text style={styles.sectionHeader}>Business</Text>
+      {isManager ? (
+        <MenuRow icon="stats-chart-outline" label="Dashboard" onPress={() => navigation.navigate('Dashboard')} />
+      ) : null}
+      <MenuRow icon="finger-print-outline" label="Time clock" onPress={() => navigation.navigate('Attendance')} />
 
-      <Text style={styles.sectionTitle}>Session</Text>
-      <BigButton title="Switch user / sign out" icon="swap-horizontal-outline" onPress={switchUser} />
+      {isOwner ? (
+        <>
+          <Text style={styles.sectionHeader}>Administration</Text>
+          <MenuRow icon="people-outline" label="Staff" onPress={() => navigation.navigate('Staff')} />
+          <MenuRow icon="business-outline" label="Branches" onPress={() => navigation.navigate('Branches')} />
+          <ImportRow />
+        </>
+      ) : null}
 
-      <Text style={styles.sectionTitle}>Backup</Text>
-      <BigButton
-        title="Back up data (share a file)"
-        icon="cloud-upload-outline"
-        onPress={doExport}
-        disabled={busy}
-      />
-      <BigButton
-        title="Restore from backup file"
-        variant="ghost"
-        icon="cloud-download-outline"
-        onPress={doImport}
-        disabled={busy}
-      />
-      <Text style={styles.dangerHint}>
-        Backups are a single .db file you can save or send to another phone. Restore replaces all current
-        data with the backup.
-      </Text>
-
-      <Text style={[styles.sectionTitle, styles.dangerTitle]}>Danger zone</Text>
-      <BigButton title="Reset all data" variant="danger" icon="trash-outline" onPress={resetAll} />
-      <Text style={styles.dangerHint}>
-        Wipes the database and re-seeds demo data. Use this if the app misbehaves (for example after a bad
-        update) — you start fresh.
-      </Text>
-
-      <AddUserModal
-        visible={addOpen}
-        onClose={() => setAddOpen(false)}
-        onCreated={async () => {
-          setAddOpen(false);
-          await refreshUsers();
-        }}
+      <Text style={styles.sectionHeader}>Account</Text>
+      <MenuRow
+        icon="log-out-outline"
+        label="Sign out"
+        color={colors.danger}
+        onPress={() => signOut()}
+        last
       />
     </ScrollView>
   );
 }
 
-function AddUserModal({
-  visible,
-  onClose,
-  onCreated,
-}: {
-  visible: boolean;
-  onClose: () => void;
-  onCreated: () => Promise<void>;
-}) {
-  const db = useSQLiteContext();
-  const [name, setName] = useState('');
-  const [saving, setSaving] = useState(false);
+function ImportRow() {
+  const { profile } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [report, setReport] = useState<ImportReport | null>(null);
 
-  const create = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setSaving(true);
+  const runImport = async () => {
+    if (!profile?.id) return;
+    setBusy(true);
+    setErrorMsg(null);
+    setReport(null);
     try {
-      await createUser(db, trimmed);
-      setName('');
-      await onCreated();
+      const r = await importLegacyData(profile.id);
+      setReport(r);
     } catch (err) {
-      Alert.alert('Could not add user', err instanceof Error ? err.message : 'Unknown error');
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
   return (
-    <ModalShell visible={visible} title="Add user" onClose={onClose}>
-      <Field
-        label="Name"
-        value={name}
-        onChangeText={setName}
-        placeholder="e.g. Ana, cashier 1"
-        autoCapitalize="words"
-        autoCorrect={false}
+    <>
+      <MenuRow
+        icon="move-outline"
+        label="Import old app data"
+        hint="1-time migration from SQLite"
+        onPress={() => setOpen(true)}
       />
-      <BigButton title="Add user" onPress={create} disabled={saving || !name.trim()} />
-    </ModalShell>
+      <ModalShell visible={open} title="Import old app data" onClose={() => setOpen(false)}>
+        <Text style={styles.importHint}>
+          This reads the previous offline database on this device and copies products, recipes,
+          ingredients, stock, sales, and stock movements into the cloud. Run it once.
+        </Text>
+        {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
+        {report ? (
+          <View style={styles.reportBox}>
+            <Text style={styles.reportTitle}>Import complete</Text>
+            <Text style={styles.reportLine}>Branches: {report.branches}</Text>
+            <Text style={styles.reportLine}>Ingredients: {report.ingredients}</Text>
+            <Text style={styles.reportLine}>Products: {report.products}</Text>
+            <Text style={styles.reportLine}>Recipes: {report.recipes}</Text>
+            <Text style={styles.reportLine}>Sales: {report.sales}</Text>
+            <Text style={styles.reportLine}>Stock movements: {report.movements}</Text>
+          </View>
+        ) : null}
+        <BigButton
+          title={busy ? 'Importing…' : 'Start import'}
+          onPress={runImport}
+          disabled={busy}
+          icon="cloud-upload-outline"
+        />
+        {report ? <BigButton title="Done" onPress={() => setOpen(false)} variant="ghost" icon="checkmark-circle-outline" /> : null}
+      </ModalShell>
+    </>
+  );
+}
+
+function MenuRow({
+  icon,
+  label,
+  hint,
+  color = colors.text,
+  onPress,
+  last,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  hint?: string;
+  color?: string;
+  onPress: () => void;
+  last?: boolean;
+}) {
+  return (
+    <Pressable style={[styles.row, last && { borderBottomWidth: 0 }]} onPress={onPress}>
+      <Ionicons name={icon} size={20} color={color} />
+      <View style={styles.rowInfo}>
+        <Text style={[styles.rowLabel, { color }]}>{label}</Text>
+        {hint ? <Text style={styles.rowHint}>{hint}</Text> : null}
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.bg,
+  wrap: { flex: 1, backgroundColor: colors.bg },
+  content: { padding: spacing.lg },
+  profileCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
   },
-  content: {
-    padding: spacing.md,
-    paddingBottom: spacing.xl,
+  avatar: {
+    width: 52,
+    height: 52,
+    borderRadius: radius.round,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  sectionTitle: {
-    fontSize: 13,
+  avatarText: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  profileInfo: { flex: 1, gap: 3 },
+  profileName: { fontSize: 17, fontWeight: '800', color: colors.text },
+  profileEmail: { fontSize: 13, color: colors.textMuted },
+  sectionHeader: {
+    fontSize: 12,
     fontWeight: '800',
     color: colors.textMuted,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    marginTop: spacing.lg,
+    marginTop: spacing.xl,
+    marginBottom: spacing.sm,
+    paddingHorizontal: 2,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.card,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  rowInfo: { flex: 1 },
+  rowLabel: { fontSize: 15, fontWeight: '600' },
+  rowHint: { fontSize: 12, color: colors.textMuted },
+  importHint: { fontSize: 14, color: colors.text, lineHeight: 21, marginBottom: spacing.md },
+  error: {
+    backgroundColor: `${colors.danger}12`,
+    color: colors.danger,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+    fontSize: 13,
     marginBottom: spacing.sm,
   },
-  card: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
+  reportBox: {
+    backgroundColor: colors.bg,
     borderRadius: radius.md,
     padding: spacing.md,
-  },
-  activeName: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: colors.text,
-  },
-  userRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
+    gap: 2,
     marginBottom: spacing.sm,
   },
-  userRowInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  userRowName: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  activeBadge: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.success,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  deleteBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.sm,
-    backgroundColor: colors.bg,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  deleteBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.danger,
-  },
-  dangerTitle: {
-    color: colors.danger,
-    marginTop: spacing.xl,
-  },
-  dangerHint: {
-    fontSize: 12,
-    color: colors.textMuted,
-    marginTop: spacing.sm,
-  },
+  reportTitle: { fontSize: 15, fontWeight: '800', color: colors.success, marginBottom: 2 },
+  reportLine: { fontSize: 13, color: colors.text },
 });

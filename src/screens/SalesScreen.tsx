@@ -1,392 +1,409 @@
-import { useSQLiteContext } from 'expo-sqlite';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { BigButton, EmptyState, ModalShell, QtyStepper } from '../components/ui';
-import { BarcodeScannerModal } from '../components/BarcodeScannerModal';
+import { useFocusEffect } from '@react-navigation/native';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
-  getProductByBarcode,
-  InsufficientStockError,
-  listProductsWithStock,
-  sellProducts,
-  type ProductWithStock,
-} from '../db';
-import { useCart, cartCount, cartTotal } from '../state/cartStore';
-import { useDataVersion } from '../state/dataVersion';
-import { useUserStore } from '../state/userStore';
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { listBranches } from '../api/branches';
+import { listProductsWithStock } from '../api/products';
+import { getReceipt, sellProducts } from '../api/sales';
+import type { Receipt as ReceiptData } from '../api/types';
+import { Badge, BigButton, ModalShell, PickerModal } from '../components/ui';
+import { useAuth } from '../lib/auth';
+import { cartCount, cartTotal, useCart } from '../state/cartStore';
+import { useBranchStore } from '../state/branchStore';
 import { colors, radius, spacing } from '../theme';
-import { fmtMoney } from '../utils';
+import { fmtDateTime, fmtMoney, fmtQty } from '../utils';
 
 export default function SalesScreen() {
-  const db = useSQLiteContext();
-  const [products, setProducts] = useState<ProductWithStock[]>([]);
+  const { profile } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { lines, add, clear } = useCart();
+  const { branches, setBranches, selectedBranchId, setSelectedBranchId } = useBranchStore();
+  const [products, setProducts] = useState<Awaited<ReturnType<typeof listProductsWithStock>>>([]);
   const [loading, setLoading] = useState(true);
-  const [cartOpen, setCartOpen] = useState(false);
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [query, setQuery] = useState('');
-  const dataVersion = useDataVersion((s) => s.version);
-  const bump = useDataVersion((s) => s.bump);
-  const userId = useUserStore((s) => s.activeUser?.id ?? null);
-
-  const lines = useCart((s) => s.lines);
-  const addToCart = useCart((s) => s.add);
-  const increment = useCart((s) => s.increment);
-  const decrement = useCart((s) => s.decrement);
-  const clearCart = useCart((s) => s.clear);
-
-  const qtyByProduct = new Map(lines.map((l) => [l.productId, l.quantity]));
-  const count = cartCount(lines);
-  const total = cartTotal(lines);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return products;
-    return products.filter((p) => p.name.toLowerCase().includes(q));
-  }, [products, query]);
+  const [search, setSearch] = useState('');
+  const [showBranchPicker, setShowBranchPicker] = useState(false);
+  const [showCheckout, setShowCheckout] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [receipt, setReceipt] = useState<ReceiptData | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const rows = await listProductsWithStock(db);
-    setProducts(rows);
-    setLoading(false);
-  }, [db]);
-
-  useEffect(() => {
-    load();
-  }, [load, dataVersion]);
-
-  const handleScan = async (data: string) => {
-    setScannerOpen(false);
+    if (!profile) return;
+    setLoading(true);
     try {
-      const product = await getProductByBarcode(db, data);
-      if (product) {
-        addToCart(product);
-      } else {
-        Alert.alert('No match', `${data} isn't linked to an active product. Add it on the Products tab.`);
+      let allBranches = branches;
+      if (allBranches.length === 0) {
+        allBranches = await listBranches();
+        setBranches(allBranches);
       }
-    } catch (err) {
-      Alert.alert('Scan failed', err instanceof Error ? err.message : 'Unknown error');
-    }
-  };
-
-  const completeSale = async () => {
-    setSubmitting(true);
-    try {
-      const cart = lines.map((l) => ({ productId: l.productId, quantity: l.quantity }));
-      const result = await sellProducts(db, cart, { userId });
-      clearCart();
-      setCartOpen(false);
-      bump();
-      const units = lines.reduce((n, l) => n + l.quantity, 0);
-      Alert.alert('Sale completed', `${units} item(s) — ${fmtMoney(result.grandTotal)}`);
-    } catch (err) {
-      if (err instanceof InsufficientStockError) {
-        Alert.alert('Not enough stock', err.message);
-      } else {
-        Alert.alert('Sale failed', err instanceof Error ? err.message : 'Unknown error');
+      if (!selectedBranchId) {
+        const preferred =
+          profile.branch_id && allBranches.some((b) => b.id === profile.branch_id)
+            ? profile.branch_id
+            : (allBranches[0]?.id ?? null);
+        if (preferred !== selectedBranchId) setSelectedBranchId(preferred);
       }
+      const stock = await listProductsWithStock(selectedBranchId ?? profile.branch_id);
+      setProducts(stock);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
-      setSubmitting(false);
+      setLoading(false);
+    }
+  }, [profile, branches, selectedBranchId, setBranches, setSelectedBranchId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
+
+  const branch = branches.find((b) => b.id === selectedBranchId);
+  const total = cartTotal(lines);
+  const count = cartCount(lines);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return products;
+    return products.filter(
+      (p) => p.name.toLowerCase().includes(q) || (p.category ?? '').toLowerCase().includes(q)
+    );
+  }, [products, search]);
+
+  const checkout = async (paymentMethod: string) => {
+    if (!branch) {
+      setErrorMsg('Select a branch first.');
+      return;
+    }
+    setErrorMsg(null);
+    setCheckoutBusy(true);
+    try {
+      const { saleId } = await sellProducts(
+        branch.id,
+        paymentMethod,
+        lines.map((l) => ({ productId: l.productId, quantity: l.quantity }))
+      );
+      clear();
+      const r = await getReceipt(saleId);
+      setReceipt(r);
+      load();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const clean = msg.replace(/\n/g, ' ');
+      setErrorMsg(clean.length > 140 ? clean.slice(0, 140) + '…' : clean);
+    } finally {
+      setCheckoutBusy(false);
     }
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.searchWrap}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={18} color={colors.textMuted} />
-          <TextInput
-            style={styles.searchInput}
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search products…"
-            placeholderTextColor={colors.textMuted}
-            autoCorrect={false}
-            clearButtonMode="while-editing"
-          />
-          {query.length > 0 ? (
-            <Pressable onPress={() => setQuery('')} hitSlop={10}>
-              <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-            </Pressable>
-          ) : null}
-        </View>
+    <View style={[styles.wrap, { paddingTop: insets.top + spacing.sm }]}>
+      {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
+
+      <View style={styles.topBar}>
+        <Pressable style={styles.branchBtn} onPress={() => setShowBranchPicker(true)}>
+          <Ionicons name="business-outline" size={15} color={colors.primary} />
+          <Text style={styles.branchBtnText} numberOfLines={1}>
+            {branch?.name ?? 'Select branch'}
+          </Text>
+          <Ionicons name="chevron-down" size={14} color={colors.primary} />
+        </Pressable>
+        <Text style={styles.cashier}>{profile?.full_name}</Text>
       </View>
 
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => String(item.id)}
-        numColumns={2}
-        columnWrapperStyle={styles.gridRow}
-        contentContainerStyle={styles.gridContent}
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          <EmptyState text={loading ? 'Loading…' : 'No active products. Add some on the Products tab.'} />
-        }
-        renderItem={({ item }) => {
-          const inCart = qtyByProduct.get(item.id) ?? 0;
-          const short = item.first_short;
-          return (
-            <Pressable
-              style={({ pressed }) => [styles.tile, pressed && styles.tilePressed]}
-              onPress={() => addToCart(item)}
-            >
-              <Text numberOfLines={2} style={styles.tileName}>
-                {item.name}
-              </Text>
-              {short ? <Text style={styles.tileShort}>Low: {short}</Text> : null}
-              <View style={styles.tileBottom}>
-                <Text style={styles.tilePrice}>{fmtMoney(item.price)}</Text>
+      {loading ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.primary} size="large" />
+        </View>
+      ) : filtered.length === 0 ? (
+        <View style={styles.center}>
+          <Ionicons name="storefront-outline" size={40} color={colors.textMuted} />
+          <Text style={styles.emptyText}>
+            {products.length === 0
+              ? 'No products yet. Ask a manager to add products first.'
+              : 'No products match your search.'}
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          data={filtered}
+          keyExtractor={(p) => p.id}
+          contentContainerStyle={styles.productList}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            <View style={styles.searchRow}>
+              <Ionicons name="search" size={16} color={colors.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                onChangeText={setSearch}
+                placeholder="Search products…"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
+          }
+          renderItem={({ item }) => {
+            const inCart = lines.find((l) => l.productId === item.id)?.quantity ?? 0;
+            const soldOut = !!item.first_short;
+            return (
+              <Pressable
+                style={styles.product}
+                onPress={() => add({ id: item.id, name: item.name, price: item.price })}
+                disabled={soldOut}
+              >
+                <View style={styles.productInfo}>
+                  <Text style={styles.productName} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  <Text style={styles.productMeta}>
+                    {fmtMoney(item.price)}
+                    {item.category ? ` · ${item.category}` : ''}
+                  </Text>
+                  {soldOut ? <Badge label={`Short on ${item.first_short}`} /> : null}
+                </View>
                 {inCart > 0 ? (
-                  <View style={styles.tileBadge}>
-                    <Text style={styles.tileBadgeText}>{inCart}</Text>
+                  <View style={styles.inCart}>
+                    <Text style={styles.inCartText}>{fmtQty(inCart)}</Text>
                   </View>
                 ) : null}
-              </View>
-            </Pressable>
-          );
-        }}
-      />
+              </Pressable>
+            );
+          }}
+        />
+      )}
 
-      <View style={styles.cartBar}>
-        <Pressable
-          style={({ pressed }) => [styles.scanBtn, pressed && styles.scanBtnPressed]}
-          onPress={() => setScannerOpen(true)}
-          accessibilityLabel="Scan barcode"
-        >
-          <Ionicons name="scan-outline" size={22} color={colors.primary} />
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [styles.cartBarBtn, pressed && styles.cartBarBtnPressed]}
-          onPress={() => setCartOpen(true)}
-        >
-          <Text style={styles.cartBarCount}>Cart · {count}</Text>
-          <Text style={styles.cartBarTotal}>{fmtMoney(total)}</Text>
-          <Text style={styles.cartBarChevron}>›</Text>
-        </Pressable>
+      <View style={[styles.cartFooter, { paddingBottom: insets.bottom + spacing.md }]}>
+        <View style={styles.cartSummary}>
+          <Text style={styles.cartLabel}>Items</Text>
+          <Text style={styles.cartCount}>{count}</Text>
+        </View>
+        <BigButton
+          title={checkoutBusy ? 'Processing…' : `Charge ${fmtMoney(total)}`}
+          onPress={() => setShowCheckout(true)}
+          disabled={checkoutBusy || count === 0 || !branch}
+          icon="card-outline"
+        />
       </View>
 
-      <BarcodeScannerModal visible={scannerOpen} onClose={() => setScannerOpen(false)} onScan={handleScan} />
+      {showBranchPicker ? (
+        <PickerModal
+          visible
+          title="Select branch"
+          options={branches.map((b) => ({ label: b.name, value: b.id }))}
+          emptyLabel="No branches yet. Create one in Settings (owner)."
+          onClose={() => setShowBranchPicker(false)}
+          onSelect={(id) => {
+            setSelectedBranchId(id);
+            setShowBranchPicker(false);
+          }}
+        />
+      ) : null}
 
-      <ModalShell visible={cartOpen} title="Cart" onClose={() => setCartOpen(false)}>
-        {lines.length === 0 ? (
-          <EmptyState text="Cart is empty. Tap products to add them." />
-        ) : (
-          <>
-            {lines.map((line) => (
-              <View key={line.productId} style={styles.cartLine}>
-                <View style={styles.cartLineInfo}>
-                  <Text numberOfLines={1} style={styles.cartLineName}>
-                    {line.name}
-                  </Text>
-                  <Text style={styles.cartLinePrice}>{fmtMoney(line.price)} each</Text>
-                </View>
-                <QtyStepper
-                  value={line.quantity}
-                  onDecrease={() => decrement(line.productId)}
-                  onIncrease={() => increment(line.productId)}
-                />
-                <Text style={styles.cartLineSub}>{fmtMoney(line.price * line.quantity)}</Text>
-              </View>
-            ))}
+      <CheckoutModal
+        visible={showCheckout}
+        total={total}
+        count={count}
+        busy={checkoutBusy}
+        onCash={() => checkout('cash')}
+        onCard={() => checkout('card')}
+        onClose={() => setShowCheckout(false)}
+      />
 
-            <View style={styles.cartTotalRow}>
-              <Text style={styles.cartTotalLabel}>Total</Text>
-              <Text style={styles.cartTotalValue}>{fmtMoney(total)}</Text>
-            </View>
-
-            <BigButton
-              title={`Charge ${fmtMoney(total)}`}
-              onPress={completeSale}
-              disabled={submitting}
-              icon="card-outline"
-            />
-            <BigButton title="Clear cart" variant="ghost" onPress={clearCart} disabled={submitting} />
-          </>
-        )}
-      </ModalShell>
+      {receipt ? (
+        <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />
+      ) : null}
     </View>
   );
 }
 
+function CheckoutModal({
+  visible,
+  total,
+  count,
+  busy,
+  onCash,
+  onCard,
+  onClose,
+}: {
+  visible: boolean;
+  total: number;
+  count: number;
+  busy: boolean;
+  onCash: () => void;
+  onCard: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <ModalShell visible={visible} title="Take payment" onClose={busy ? () => {} : onClose}>
+      <Text style={styles.checkoutTotal}>{fmtMoney(total)}</Text>
+      <Text style={styles.checkoutSub}>{count} item{count === 1 ? '' : 's'} · no tax</Text>
+      <BigButton title="Cash" onPress={onCash} disabled={busy} icon="cash-outline" />
+      <BigButton title="Card" onPress={onCard} disabled={busy} icon="card-outline" />
+    </ModalShell>
+  );
+}
+
+function ReceiptModal({ receipt, onClose }: { receipt: ReceiptData; onClose: () => void }) {
+  return (
+    <ModalShell visible title="Receipt" onClose={onClose}>
+      <View style={styles.receiptHeader}>
+        <Text style={styles.receiptBranch}>{receipt.branch_name || 'POS Cloud'}</Text>
+        {receipt.branch_address ? (
+          <Text style={styles.receiptMuted}>{receipt.branch_address}</Text>
+        ) : null}
+        <Text style={styles.receiptMuted}>Receipt #{receipt.sale_id.slice(0, 8).toUpperCase()}</Text>
+        <Text style={styles.receiptMuted}>
+          {fmtDateTime(receipt.created_at)} · {receipt.payment_method}
+        </Text>
+        {receipt.cashier_name ? (
+          <Text style={styles.receiptMuted}>Served by {receipt.cashier_name}</Text>
+        ) : null}
+      </View>
+      <View style={styles.receiptDivider} />
+      {receipt.items.map((item, i) => (
+        <View key={i} style={styles.receiptRow}>
+          <View style={styles.receiptRowLeft}>
+            <Text style={styles.receiptItemName} numberOfLines={1}>
+              {item.product_name}
+            </Text>
+            <Text style={styles.receiptMuted}>
+              {fmtQty(item.quantity_sold)} × {fmtMoney(item.unit_price)}
+            </Text>
+          </View>
+          <Text style={styles.receiptItemTotal}>{fmtMoney(item.total_price)}</Text>
+        </View>
+      ))}
+      <View style={styles.receiptDivider} />
+      <View style={styles.receiptRow}>
+        <Text style={styles.receiptTotalLabel}>TOTAL</Text>
+        <Text style={styles.receiptTotal}>{fmtMoney(receipt.total)}</Text>
+      </View>
+      <Text style={styles.receiptThanks}>Thank you!</Text>
+      <BigButton title="Done" onPress={onClose} icon="checkmark-circle-outline" />
+    </ModalShell>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
-  searchWrap: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xs,
-  },
-  searchBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 4,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: colors.text,
-    paddingVertical: 8,
-  },
-  gridContent: {
-    padding: spacing.md,
-    paddingBottom: spacing.lg,
-  },
-  gridRow: {
-    gap: spacing.md,
-  },
-  tile: {
-    flex: 1,
-    backgroundColor: colors.card,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.md,
-    minHeight: 92,
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  tilePressed: {
-    backgroundColor: colors.bg,
-    transform: [{ scale: 0.98 }],
-  },
-  tileName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.text,
-  },
-  tileShort: {
-    fontSize: 12,
-    fontWeight: '700',
+  wrap: { flex: 1, backgroundColor: colors.bg },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
+  error: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    backgroundColor: `${colors.danger}12`,
     color: colors.danger,
-    marginTop: 2,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+    fontSize: 13,
   },
-  tileBottom: {
+  topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
   },
-  tilePrice: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: colors.primary,
+  branchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    maxWidth: '70%',
   },
-  tileBadge: {
-    minWidth: 24,
-    height: 24,
+  branchBtnText: { color: colors.primary, fontWeight: '700', fontSize: 14 },
+  cashier: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  searchInput: { flex: 1, paddingVertical: 10, fontSize: 15, color: colors.text },
+  productList: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
+  product: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  productInfo: { flex: 1, gap: 2 },
+  productName: { fontSize: 15, fontWeight: '700', color: colors.text },
+  productMeta: { fontSize: 13, color: colors.textMuted },
+  inCart: {
+    minWidth: 30,
+    height: 30,
     borderRadius: radius.round,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
   },
-  tileBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  cartBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    padding: spacing.md,
-    backgroundColor: colors.card,
-    borderTopWidth: StyleSheet.hairlineWidth,
+  inCartText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  emptyText: { fontSize: 14, color: colors.textMuted, textAlign: 'center', marginTop: spacing.md },
+  cartFooter: {
+    borderTopWidth: 1,
     borderTopColor: colors.border,
-  },
-  scanBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scanBtnPressed: {
     backgroundColor: colors.card,
-  },
-  cartBarBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: 14,
     paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
   },
-  cartBarBtnPressed: {
-    backgroundColor: colors.primaryDark,
-  },
-  cartBarCount: {
-    flex: 1,
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  cartBarTotal: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  cartBarChevron: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-    marginLeft: spacing.sm,
-  },
-  cartLine: {
+  cartSummary: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-  },
-  cartLineInfo: {
-    flex: 1,
-    minWidth: 0,
-  },
-  cartLineName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.text,
-  },
-  cartLinePrice: {
-    fontSize: 12,
-    color: colors.textMuted,
-    marginTop: 2,
-  },
-  cartLineSub: {
-    minWidth: 64,
-    textAlign: 'right',
-    fontSize: 15,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  cartTotalRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-    marginTop: spacing.xs,
+    alignItems: 'center',
+    paddingHorizontal: 2,
   },
-  cartTotalLabel: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.text,
+  cartLabel: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
+  cartCount: { fontSize: 18, fontWeight: '800', color: colors.text },
+  checkoutTotal: { fontSize: 34, fontWeight: '800', color: colors.text, textAlign: 'center' },
+  checkoutSub: { fontSize: 14, color: colors.textMuted, textAlign: 'center', marginTop: 4 },
+  receiptHeader: { alignItems: 'center', gap: 2 },
+  receiptBranch: { fontSize: 18, fontWeight: '800', color: colors.text },
+  receiptMuted: { fontSize: 12, color: colors.textMuted },
+  receiptDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.md,
+    borderStyle: 'dashed',
   },
-  cartTotalValue: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: colors.text,
+  receiptRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  receiptRowLeft: { flex: 1, paddingRight: spacing.md },
+  receiptItemName: { fontSize: 14, fontWeight: '600', color: colors.text },
+  receiptItemTotal: { fontSize: 14, fontWeight: '700', color: colors.text },
+  receiptTotalLabel: { fontSize: 15, fontWeight: '800', color: colors.text },
+  receiptTotal: { fontSize: 18, fontWeight: '800', color: colors.primary },
+  receiptThanks: {
+    textAlign: 'center',
+    marginTop: spacing.md,
+    color: colors.textMuted,
+    fontSize: 13,
+    fontStyle: 'italic',
   },
 });
